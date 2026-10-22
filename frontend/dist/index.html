@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Media Tools</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header class="band" id="band">
+        <div class="here" id="here"></div>
+        <div class="band-gap"></div>
+        <nav class="band-nav" id="nav" aria-label="Go To"></nav>
+        <div class="band-extra" id="nav-foot"></div>
+        <label class="find">
+          <span class="icon-search" data-icon="search"></span>
+          <input
+            id="tool-filter"
+            type="search"
+            placeholder="Find a Tool"
+            aria-label="Find a Tool"
+            autocomplete="off"
+            spellcheck="false"
+          />
+          <kbd>Ctrl K</kbd>
+        </label>
+      </header>
+
+      <nav class="tabs" id="tabs" aria-label="Tools"></nav>
+
+      <div class="work">
+        <main class="page" id="page"></main>
+
+        <aside class="board" id="queue" aria-label="Jobs">
+          <div class="board-head">
+            <div class="board-title">
+              <h2>Jobs</h2>
+              <button class="btn small" id="btn-cancel-all">Cancel All</button>
+              <button class="btn small" id="btn-clear">Clear Finished</button>
+            </div>
+            <div class="board-overall" id="queue-overall"></div>
+          </div>
+          <div class="board-body" id="queue-body"></div>
+        </aside>
+      </div>
+
+      <footer class="status" aria-live="polite">
+        <span class="dot" id="status-dot"></span>
+        <span class="line" id="status-line">Starting</span>
+        <span class="facts" id="status-facts"></span>
+        <span class="facts" id="app-version"></span>
+      </footer>
+    </div>
+
+    <div class="toasts" id="toasts" aria-live="assertive"></div>
+
+    <script src="icons.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>

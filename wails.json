@@ -1,0 +1,19 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "MediaTools",
+  "outputfilename": "MediaTools",
+  "frontend:install": "",
+  "frontend:build": "",
+  "frontend:dev:watcher": "",
+  "wailsjsdir": "./frontend",
+  "author": {
+    "name": "LuciCMD"
+  },
+  "info": {
+    "companyName": "LuciCMD",
+    "productName": "Media Tools",
+    "productVersion": "2.2.0",
+    "copyright": "MIT licensed",
+    "comments": "Desktop front end for ffmpeg, ffprobe and yt-dlp"
+  }
+}
