@@ -73,7 +73,7 @@ func TestDownloadGIFFractionalNumbersAreKept(t *testing.T) {
 	if err != nil {
 		return
 	}
-	pp := argValue(plan.Args, "--postprocessor-args")
+	pp, _ := gifGraphs(gifFinishOf(t, plan))
 	if !containsAll(pp, "fps=2", "scale=32") {
 		t.Errorf("fps 2.5 and width 321.5 were accepted but became %q", pp)
 	}

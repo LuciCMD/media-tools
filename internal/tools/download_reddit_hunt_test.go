@@ -104,7 +104,7 @@ func TestHuntRedditLinkStaysLastOnRetry(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		plan, err := tool.Build(Inputs{Path: viewer, Output: t.TempDir(), Options: valid}, softwareEncode())
+		plan, err := tool.Build(Inputs{Path: viewer, Output: t.TempDir(), WorkDir: t.TempDir(), Options: valid}, softwareEncode())
 		if err != nil {
 			t.Fatalf("%s: %v", c.id, err)
 		}
@@ -203,7 +203,8 @@ func runHunt(t *testing.T, toolID, reddit, local, out string, opts map[string]st
 	if err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
-	plan, err := tool.Build(Inputs{Path: reddit, Output: out, Options: valid}, softwareEncode())
+	work := testWorkDir(t, out)
+	plan, err := tool.Build(Inputs{Path: reddit, Output: out, WorkDir: work, Options: valid}, softwareEncode())
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -221,6 +222,12 @@ func runHunt(t *testing.T, toolID, reddit, local, out string, opts map[string]st
 	var buf bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &buf, &buf
 	runErr := cmd.Run()
+	if runErr == nil {
+		more, err := finishDownload(ctx, plan, work)
+		buf.WriteString(more)
+		runErr = err
+	}
+	_ = os.RemoveAll(work)
 	var files []string
 	_ = filepath.WalkDir(out, func(p string, d fs.DirEntry, err error) error {
 		if err == nil && !d.IsDir() && !strings.HasPrefix(d.Name(), ".") {
@@ -381,7 +388,13 @@ func TestHuntYtdlpRedditProgressStages(t *testing.T) {
 			if r.err != nil {
 				t.Fatalf("yt-dlp failed: %v\n%s", r.err, r.log)
 			}
-			lines := strings.Count(r.log, "mediatools-")
+			// Only lines that start with the prefix, since the work folder's name holds it too
+			lines := 0
+			for _, l := range strings.Split(r.log, "\n") {
+				if strings.HasPrefix(l, "mediatools-dl ") || strings.HasPrefix(l, "mediatools-pp ") {
+					lines++
+				}
+			}
 			if len(r.samples) != lines {
 				t.Errorf("%d templated lines but %d samples", lines, len(r.samples))
 			}

@@ -9,12 +9,12 @@ import (
 	"testing"
 )
 
-// TestFramePaletteKeepsTheEdges checks a GIF with a palette per frame keeps
-// still parts of the picture in their own colours, where redrawing only the
-// changed rectangle left the edges on the last frame's colour numbers under a
-// new palette, so they flashed wrong colours (worst frame 5.7 dB on a minute
-// of 720p)
-func TestFramePaletteKeepsTheEdges(t *testing.T) {
+// TestGIFKeepsTheEdges checks the two-step GIF keeps still parts of the
+// picture in their own colours, where a palette per frame that only redrew
+// the changed rectangle left the edges on the last frame's colour numbers
+// under a new palette, so they flashed wrong colours (worst frame 5.7 dB on a
+// minute of 720p)
+func TestGIFKeepsTheEdges(t *testing.T) {
 	bins := needFFmpeg(t)
 	dir := t.TempDir()
 	src := filepath.Join(dir, "src.mp4")
@@ -23,8 +23,8 @@ func TestFramePaletteKeepsTheEdges(t *testing.T) {
 		"-f", "lavfi", "-i", "testsrc2=s=100x76:r=15",
 		"-filter_complex", "[0][1]overlay=x='110+50*sin(t)':y=52:shortest=1",
 		"-t", "4", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "12", "-pix_fmt", "yuv420p", "-y", src)
-	run(t, bins.FFmpeg, "-i", src, "-an", "-vf", gifFramePaletteGraph(gifDownloadStages(map[string]string{"sizing": gifOriginal, "pace": gifOriginal}), 128, "sierra2_4a"),
-		"-loop", "0", "-y", gif)
+	stages := gifDownloadStages(map[string]string{"sizing": gifOriginal, "pace": gifOriginal})
+	runBuilt(t, bins.FFmpeg, gifTwoPass(src, gif, filepath.Join(dir, "palette.png"), stages, 256, "bayer"))
 
 	stats := filepath.Join(dir, "psnr.log")
 	// The filter reads the stats path as a filter option, so it runs from dir with a bare name
@@ -54,5 +54,22 @@ func TestFramePaletteKeepsTheEdges(t *testing.T) {
 	}
 	if worst < 25 {
 		t.Errorf("the left edge's worst frame is %.1f dB against the source, want 25 or more", worst)
+	}
+}
+
+// runBuilt runs each of a built plan's commands with ffmpeg, then moves a staged
+// result into place, the way the queue does
+func runBuilt(t *testing.T, ffmpegBin string, p Plan) {
+	t.Helper()
+	for _, args := range p.Commands() {
+		run(t, ffmpegBin, args...)
+	}
+	if p.Staged != "" {
+		if err := os.Rename(p.Staged, p.OutputPath); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, f := range p.Cleanup {
+		_ = os.Remove(f)
 	}
 }

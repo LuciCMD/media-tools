@@ -54,6 +54,8 @@ type Spec struct {
 	Files []File `json:"-"`
 	// Cleanup names files the commands leave behind, removed after the last.
 	Cleanup []string `json:"-"`
+	// Steps names each command for the job board, in order
+	Steps []string `json:"-"`
 
 	// ProbePaths, when Totals is empty, are probed by the worker just before
 	// the job runs and their durations added up. Probing at submission would
@@ -64,6 +66,16 @@ type Spec struct {
 	// bitrate computed to hit a file size. It replaces Args, Passes, Files
 	// and Cleanup.
 	Prepare func(context.Context, ffmpeg.Totals) (Commands, error) `json:"-"`
+
+	// Then, when set, builds the rest of the job once the commands above have
+	// succeeded, run by a program of its own, such as ffmpeg making a GIF from
+	// what yt-dlp downloaded, and ThenCount is how many commands it returns
+	// so one bar covers the whole job from the start
+	Then      func(context.Context) (Stage, error) `json:"-"`
+	ThenCount int                                  `json:"-"`
+	// WorkDir is a folder made for this job alone, removed with all it holds
+	// once the job ends however it ends
+	WorkDir string `json:"-"`
 }
 
 // Commands is the executable part of a Spec, as Prepare produces it.
@@ -72,6 +84,25 @@ type Commands struct {
 	Passes  [][]string
 	Files   []File
 	Cleanup []string
+	// Steps names each command for the job board, in order
+	Steps []string
+	// Keep moves a file into place once every command has succeeded, so a
+	// failed or cancelled job leaves nothing half made at its destination
+	Keep *Move
+}
+
+// Stage is the rest of a job that Then builds, with the program that runs it
+// and the extent of its work for the bar
+type Stage struct {
+	Binary string
+	Totals ffmpeg.Totals
+	Commands
+}
+
+// Move is a rename from a job's own folder to where its result belongs
+type Move struct {
+	From string
+	To   string
 }
 
 // File is a small text file a job needs on disk while it runs, such as the
@@ -194,8 +225,11 @@ func validateSpec(spec Spec) error {
 	if len(spec.Args) == 0 && spec.Prepare == nil {
 		return errors.New("jobs: spec has no arguments")
 	}
-	if len(spec.Passes)+1 > maxPasses {
+	if len(spec.Passes)+1+spec.ThenCount > maxPasses {
 		return fmt.Errorf("jobs: spec has more than %d commands", maxPasses)
+	}
+	if (spec.Then == nil) != (spec.ThenCount == 0) || spec.ThenCount < 0 {
+		return errors.New("jobs: spec's Then and ThenCount don't match")
 	}
 	if len(spec.ProbePaths) > maxProbePaths || len(spec.Files) > maxJobFiles {
 		return errors.New("jobs: spec probes or writes too many files")
@@ -247,31 +281,94 @@ func (q *Queue) execute(id string) {
 		q.settle(ctx, id, err)
 		return
 	}
+	count := len(cmds.Passes) + 1 + spec.ThenCount
 	err = writeFiles(cmds.Files)
 	if err == nil {
-		err = q.runPasses(ctx, id, spec.Binary, cmds, totals)
+		err = q.runPasses(ctx, id, spec.Binary, cmds, totals, 0, count)
+	}
+	if err == nil {
+		err = keep(cmds.Keep)
+	}
+	if err == nil && spec.Then != nil {
+		err = q.runThen(ctx, id, spec, len(cmds.Passes)+1, count)
 	}
 	// Temporary files go whether the job succeeds, fails or is cancelled, and
 	// before the outcome is announced, so none is still there once it ends.
 	removeFiles(cmds)
+	if spec.WorkDir != "" {
+		_ = os.RemoveAll(spec.WorkDir)
+	}
 	q.settle(ctx, id, err)
 }
 
+// runThen builds and runs the rest of a job once its first commands have
+// succeeded, carrying on the same bar from command first of count
+func (q *Queue) runThen(ctx context.Context, id string, spec Spec, first, count int) error {
+	stage, err := spec.Then(ctx)
+	if err != nil {
+		return err
+	}
+	if len(stage.Passes)+1 != spec.ThenCount || len(stage.Args) == 0 || stage.Binary == "" ||
+		len(stage.Files) > maxJobFiles {
+		return errors.New("jobs: the job's next step isn't what it said it would be")
+	}
+	err = writeFiles(stage.Files)
+	if err == nil {
+		err = q.runPasses(ctx, id, stage.Binary, stage.Commands, stage.Totals, first, count)
+	}
+	if err == nil {
+		err = keep(stage.Keep)
+	}
+	removeFiles(stage.Commands)
+	return err
+}
+
+// keep moves a finished result into place
+func keep(m *Move) error {
+	if m == nil {
+		return nil
+	}
+	if err := os.Rename(m.From, m.To); err != nil {
+		return fmt.Errorf("couldn't move the result into place: %w", err)
+	}
+	return nil
+}
+
 // runPasses runs each command in turn, reporting progress across all of them
-// as one bar: pass one of two fills the first half.
-func (q *Queue) runPasses(ctx context.Context, id, binary string, cmds Commands, totals ffmpeg.Totals) error {
+// as one bar, pass one of two filling the first half, these being the job's
+// commands from first on, of count in all
+func (q *Queue) runPasses(ctx context.Context, id, binary string, cmds Commands, totals ffmpeg.Totals,
+	first, count int) error {
 	all := make([][]string, 0, 1+len(cmds.Passes))
 	all = append(all, cmds.Args)
 	all = append(all, cmds.Passes...)
-	if len(all) > maxPasses {
+	if len(all) > maxPasses || first+len(all) > count {
 		return fmt.Errorf("jobs: more than %d commands", maxPasses)
 	}
 
 	for i, args := range all {
-		pass, count := i, len(all)
+		pass := first + i
+		step := ""
+		if i < len(cmds.Steps) {
+			step = cmds.Steps[i]
+		}
+		// A named step shows as it starts, since some, such as palettegen,
+		// report nothing until they end
+		if step != "" {
+			start := ffmpeg.Progress{Stage: step, ETASeconds: -1}
+			// Without a length the samples that follow are unknown too, so no set point first
+			if totals.DurationS <= 0 && totals.Frames <= 0 {
+				start.Fraction = -1
+			}
+			q.publishProgress(id, spreadOverPasses(start, pass, count, totals))
+		}
 		gate := progressGate{throttle: newThrottle(emitIntervalMs)}
 		_, err := ffmpeg.Run(ctx, ffmpeg.Request{Binary: binary, Args: args, Totals: totals},
 			func(p ffmpeg.Progress) {
+				// A program that names its own steps, as yt-dlp does, keeps them
+				if p.Stage == "" {
+					p.Stage = step
+				}
 				p = spreadOverPasses(p, pass, count, totals)
 				if gate.allow(p) {
 					q.publishProgress(id, p)
@@ -305,7 +402,8 @@ func spreadOverPasses(p ffmpeg.Progress, pass, count int, totals ffmpeg.Totals) 
 // on the source's length.
 func commandsFor(ctx context.Context, spec Spec, totals ffmpeg.Totals) (Commands, error) {
 	if spec.Prepare == nil {
-		return Commands{Args: spec.Args, Passes: spec.Passes, Files: spec.Files, Cleanup: spec.Cleanup}, nil
+		return Commands{Args: spec.Args, Passes: spec.Passes, Files: spec.Files, Cleanup: spec.Cleanup,
+			Steps: spec.Steps}, nil
 	}
 	cmds, err := spec.Prepare(ctx, totals)
 	if err != nil {
@@ -433,19 +531,28 @@ func (q *Queue) Cancel(id string) error {
 		q.mu.Unlock()
 		return fmt.Errorf("jobs: unknown job %q", id)
 	}
-	cancel, running := q.cancels[id]
-	queued := job.State == StateQueued
-	q.mu.Unlock()
-
-	if running {
+	if cancel, running := q.cancels[id]; running {
+		q.mu.Unlock()
 		cancel()
 		return nil
 	}
-	if queued {
-		q.finish(id, StateCanceled, "canceled before starting")
-		return nil
+	if job.State != StateQueued {
+		q.mu.Unlock()
+		return fmt.Errorf("jobs: job %q is not cancellable", id)
 	}
-	return fmt.Errorf("jobs: job %q is not cancellable", id)
+	// Marked under the lock begin checks, so a worker can't start it meanwhile
+	job.State = StateCanceled
+	job.Error = "canceled before starting"
+	job.EndedAt = time.Now().UnixMilli()
+	snapshot := *job
+	q.mu.Unlock()
+
+	q.listener(snapshot)
+	// It never ran, so nothing else will remove the folder made for it
+	if snapshot.WorkDir != "" {
+		_ = os.RemoveAll(snapshot.WorkDir)
+	}
+	return nil
 }
 
 // CancelAll stops every queued and running job.

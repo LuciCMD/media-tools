@@ -16,7 +16,7 @@ import (
 
 // Bounds on the registry (Power of Ten rule 2).
 const (
-	MaxOptions = 12
+	MaxOptions = 14
 	MaxTools   = 128
 )
 
@@ -118,6 +118,25 @@ type Plan struct {
 	// Cleanup names files a command leaves behind that are removed after
 	// the last command, such as two-pass statistics logs.
 	Cleanup []string
+	// Steps names each command for the job board, in order
+	Steps []string
+	// Staged is where the last command writes, moved to OutputPath once every
+	// command has succeeded, so a cancelled job leaves nothing half made there
+	Staged string
+
+	// Finish, for a download that's converted afterwards, builds the ffmpeg
+	// commands that turn src, the file the download left in its work folder,
+	// into the result, and FinishCount is how many it returns
+	Finish      func(src string, color SourceColor) (Plan, error)
+	FinishCount int
+}
+
+// SourceColor is what a source's video says of its colours, for a tool that
+// turns it into RGB, zero when it hasn't been probed
+type SourceColor struct {
+	Space  string // the colour standard it names, empty or "unknown" for none
+	Width  int
+	Height int
 }
 
 // File is a small text file a plan needs on disk while it runs.
@@ -142,6 +161,12 @@ type Inputs struct {
 	Paths   []string          // every source, in order, for a tool that combines files
 	Output  string            // resolved destination path
 	Options map[string]string // option key -> raw value
+	// WorkDir is an empty folder of the download's own, for one that's
+	// converted after it lands, and is removed once the job ends
+	WorkDir string
+	// Color describes the source's video, for a tool declared with
+	// NeedsColor or NeedsStreams, and is zero until it's probed or if that failed
+	Color SourceColor
 	// DurationS is the source's duration, probed just before the job runs,
 	// for a tool declared with NeedsDuration. It is zero otherwise.
 	DurationS float64
@@ -179,6 +204,9 @@ type Tool struct {
 	// NeedsStreams, like NeedsDuration, defers Build until the source has
 	// been probed, for a tool that depends on which tracks it has.
 	NeedsStreams bool `json:"needsStreams,omitempty"`
+	// NeedsColor defers Build the same way for a tool that wants the source's
+	// colours, which a failed probe only leaves unchecked
+	NeedsColor bool `json:"needsColor,omitempty"`
 	// VideoKeepsFormat makes a video input keep its own container whatever
 	// the format option says; the option applies to audio inputs only.
 	VideoKeepsFormat bool `json:"videoKeepsFormat,omitempty"`

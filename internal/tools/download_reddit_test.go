@@ -81,7 +81,7 @@ func TestDownloadsFetchTheRedditFile(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		plan, err := tool.Build(Inputs{Path: viewer, Output: t.TempDir(), Options: valid}, softwareEncode())
+		plan, err := tool.Build(Inputs{Path: viewer, Output: t.TempDir(), WorkDir: t.TempDir(), Options: valid}, softwareEncode())
 		if err != nil {
 			t.Fatalf("%s: %v", id, err)
 		}
@@ -136,7 +136,8 @@ func runRedditPlan(t *testing.T, local string, opts map[string]string, fixed boo
 	}
 	out := t.TempDir()
 	viewer := "https://www.reddit.com/media?url=" + url.QueryEscape(redditPreview)
-	plan, err := tool.Build(Inputs{Path: viewer, Output: out, Options: valid}, softwareEncode())
+	work := testWorkDir(t, out)
+	plan, err := tool.Build(Inputs{Path: viewer, Output: out, WorkDir: work, Options: valid}, softwareEncode())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,6 +149,12 @@ func runRedditPlan(t *testing.T, local string, opts map[string]string, fixed boo
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	log, runErr := exec.CommandContext(ctx, "yt-dlp", args...).CombinedOutput()
+	if runErr == nil {
+		var more string
+		more, runErr = finishDownload(ctx, plan, work)
+		log = append(log, more...)
+	}
+	_ = os.RemoveAll(work)
 	entries, _ := os.ReadDir(out)
 	var files []string
 	for _, e := range entries {

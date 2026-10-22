@@ -200,7 +200,7 @@ func TestDecodeProbe(t *testing.T) {
 		"format": {"format_name":"mov,mp4","duration":"120.5","size":"1048576","bit_rate":"800000"},
 		"streams": [
 			{"index":0,"codec_type":"video","codec_name":"h264","width":1920,"height":1080,
-			 "avg_frame_rate":"30/1","nb_frames":"3615"},
+			 "avg_frame_rate":"30/1","nb_frames":"3615","color_space":"bt709"},
 			{"index":1,"codec_type":"audio","codec_name":"aac","sample_rate":"48000","channels":2,
 			 "tags":{"language":"eng"}}
 		]
@@ -221,6 +221,10 @@ func TestDecodeProbe(t *testing.T) {
 	}
 	if info.Streams[1].Language != "eng" {
 		t.Errorf("language = %q, want eng", info.Streams[1].Language)
+	}
+	// A GIF needs it to know whether the video names its colour standard
+	if info.Streams[0].ColorSpace != "bt709" || info.Streams[1].ColorSpace != "" {
+		t.Errorf("colour spaces %q and %q, want bt709 and none", info.Streams[0].ColorSpace, info.Streams[1].ColorSpace)
 	}
 }
 

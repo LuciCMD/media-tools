@@ -50,6 +50,9 @@ type App struct {
 	claimMu sync.Mutex
 	claimed map[string]bool
 
+	// retryMu makes checking for a running retry and submitting one a single step
+	retryMu sync.Mutex
+
 	notes    notifier
 	download modelDownload
 }
@@ -492,18 +495,70 @@ func (a *App) submitDownload(tool tools.Tool, req RunRequest, opts map[string]st
 		return "", err
 	}
 
-	plan, err := tool.Build(tools.Inputs{Path: req.URL, Output: outDir, Options: opts}, a.encodeProfile(tool))
+	in := tools.Inputs{Path: req.URL, Output: outDir, Options: opts}
+	enc := a.encodeProfile(tool)
+	plan, err := tool.Build(in, enc)
+	// A download that's converted once it lands, such as a GIF, lands in a folder of its own
+	if errors.Is(err, tools.ErrNeedsWorkDir) {
+		if in.WorkDir, err = os.MkdirTemp(outDir, ".mediatools-"); err != nil {
+			return "", fmt.Errorf("couldn't make a work folder in %s: %w", outDir, err)
+		}
+		if plan, err = tool.Build(in, enc); err != nil {
+			_ = os.Remove(in.WorkDir)
+			return "", err
+		}
+	}
 	if err != nil {
 		return "", err
 	}
-	return a.queue.Submit(jobs.Spec{
+	id, err := a.queue.Submit(downloadSpec(tool, req.URL, outDir, in.WorkDir, plan, a.bins))
+	if err != nil && in.WorkDir != "" {
+		_ = os.RemoveAll(in.WorkDir)
+	}
+	return id, err
+}
+
+// downloadSpec builds the job for a download, which ffmpeg finishes from
+// work when the plan converts what lands there
+func downloadSpec(tool tools.Tool, link, outDir, work string, plan tools.Plan, bins ffmpeg.Binaries) jobs.Spec {
+	spec := jobs.Spec{
 		Tool:   tool.ID,
 		Label:  tool.Name,
-		Input:  req.URL,
+		Input:  link,
 		Output: outDir,
-		Binary: a.bins.YTDLP,
+		Binary: bins.YTDLP,
 		Args:   append(ffmpeg.DownloadProgressArgs(), plan.Args...),
-	})
+	}
+	if plan.Finish == nil {
+		return spec
+	}
+	spec.WorkDir = work
+	spec.ThenCount = plan.FinishCount
+	spec.Then = func(ctx context.Context) (jobs.Stage, error) {
+		return finishStage(ctx, plan, work, bins.FFmpeg)
+	}
+	return spec
+}
+
+// finishStage builds the commands that turn the one file a download left in
+// work into its result, measuring the file so the bar can show a percentage
+func finishStage(ctx context.Context, plan tools.Plan, work, ffmpegBin string) (jobs.Stage, error) {
+	src, err := ffmpeg.FindDownload(work)
+	if err != nil {
+		return jobs.Stage{}, err
+	}
+	// An unreadable file costs only the percentage and the colour check
+	var totals ffmpeg.Totals
+	var color tools.SourceColor
+	if info, err := ffmpeg.Probe(ctx, src); err == nil {
+		totals = ffmpeg.Totals{DurationS: info.DurationS, Frames: info.TotalFrame}
+		color = videoColor(info)
+	}
+	p, err := plan.Finish(src, color)
+	if err != nil {
+		return jobs.Stage{}, err
+	}
+	return jobs.Stage{Binary: ffmpegBin, Totals: totals, Commands: commandsOf(p)}, nil
 }
 
 // submitConversions enqueues one job per selected input file.
@@ -548,10 +603,10 @@ func (a *App) submitJob(tool tools.Tool, req RunRequest, opts map[string]string,
 	in := tools.Inputs{Path: first, Paths: paths, Output: target.file, Options: opts,
 		Sidecar: findSidecar(first, tool.Sidecars), SubtitleTracks: tools.UnknownCount}
 
-	// A tool whose command depends on the length or the tracks is built again
-	// by the worker once the source is probed. Building it now with stand-ins
-	// still checks every option while the user is looking at them.
-	deferred := tool.NeedsDuration || tool.NeedsStreams
+	// A tool whose command depends on the length, the tracks or the colours is
+	// built again by the worker once the source is probed, and building it now
+	// with stand-ins still checks every option while the user is looking
+	deferred := tool.NeedsDuration || tool.NeedsStreams || tool.NeedsColor
 	check := in
 	if tool.NeedsDuration {
 		check.DurationS = validationDurationS
@@ -588,6 +643,7 @@ func (a *App) submitJob(tool tools.Tool, req RunRequest, opts map[string]string,
 	} else {
 		cmds := commandsOf(plan)
 		spec.Args, spec.Passes, spec.Files, spec.Cleanup = cmds.Args, cmds.Passes, cmds.Files, cmds.Cleanup
+		spec.Steps = cmds.Steps
 		// The worker probes the sources just before running, so a large batch
 		// is queued at once instead of waiting here on one ffprobe per file.
 		if plan.NeedsProbe {
@@ -603,27 +659,44 @@ func (a *App) submitJob(tool tools.Tool, req RunRequest, opts map[string]string,
 }
 
 // probedInputs fills in what the worker learned about the source just
-// before the job runs: its length, and for a tool that needs them, its
-// tracks.
+// before the job runs, its length, and for a tool that needs them, its
+// tracks and colours
 func probedInputs(ctx context.Context, tool tools.Tool, in tools.Inputs, totals ffmpeg.Totals) (tools.Inputs, error) {
 	if tool.NeedsDuration && totals.DurationS <= 0 {
 		return in, errors.New("the length of this video couldn't be read, so it can't be sized")
 	}
 	in.DurationS = totals.DurationS
-	if !tool.NeedsStreams {
+	if !tool.NeedsStreams && !tool.NeedsColor {
 		return in, nil
 	}
 	info, err := ffmpeg.Probe(ctx, in.Path)
-	if err != nil {
+	if err != nil && tool.NeedsStreams {
 		return in, fmt.Errorf("couldn't read which tracks this video has: %w", err)
 	}
-	in.SubtitleTracks = 0
-	for _, s := range info.Streams {
-		if s.Type == "subtitle" {
-			in.SubtitleTracks++
+	// Colours are a refinement, so without them the job runs unchecked
+	if err != nil {
+		return in, nil
+	}
+	if tool.NeedsStreams {
+		in.SubtitleTracks = 0
+		for _, s := range info.Streams {
+			if s.Type == "subtitle" {
+				in.SubtitleTracks++
+			}
 		}
 	}
+	in.Color = videoColor(info)
 	return in, nil
+}
+
+// videoColor describes the first video stream's colours, or zero without one
+func videoColor(info ffmpeg.MediaInfo) tools.SourceColor {
+	for _, s := range info.Streams {
+		if s.Type == "video" {
+			return tools.SourceColor{Space: s.ColorSpace, Width: s.Width, Height: s.Height}
+		}
+	}
+	return tools.SourceColor{}
 }
 
 // validationDurationS is the stand-in length used to check a length-dependent
@@ -642,12 +715,17 @@ func commandsOf(p tools.Plan) jobs.Commands {
 	for _, f := range p.Files {
 		files = append(files, jobs.File{Path: f.Path, Content: f.Content})
 	}
-	return jobs.Commands{
+	cmds := jobs.Commands{
 		Args:    append(ffmpeg.ProgressArgs(), p.Args...),
 		Passes:  passes,
 		Files:   files,
 		Cleanup: p.Cleanup,
+		Steps:   p.Steps,
 	}
+	if p.Staged != "" {
+		cmds.Keep = &jobs.Move{From: p.Staged, To: p.OutputPath}
+	}
+	return cmds
 }
 
 // jobLabel names a job by its tool and its file, or its first file and how
@@ -868,6 +946,14 @@ func (a *App) RetryJob(id string) (string, error) {
 	if !finished {
 		return "", errors.New("that job is still queued or running")
 	}
+	a.retryMu.Lock()
+	defer a.retryMu.Unlock()
+	// A retry runs in the same work folder, which the first to end removes
+	// under the other, and the output claim doesn't stop it since any
+	// download ending in that folder releases the folder's claim
+	if spec.WorkDir != "" && a.workDirBusy(spec.WorkDir) {
+		return "", errors.New("this download is already being retried, so wait for that to finish")
+	}
 	// The command names its output, so it can only be retried if no live job
 	// has since claimed the same path. Overwrite is right here: whatever is
 	// there is this job's own partial output.
@@ -888,6 +974,16 @@ func (a *App) RetryJob(id string) (string, error) {
 		a.releaseOutput(path)
 	}
 	return newID, err
+}
+
+// workDirBusy reports a job still queued or running in work
+func (a *App) workDirBusy(work string) bool {
+	for _, j := range a.queue.List() {
+		if j.WorkDir == work && (j.State == jobs.StateQueued || j.State == jobs.StateRunning) {
+			return true
+		}
+	}
+	return false
 }
 
 // retryDownloadArgs makes yt-dlp redo a download rather than keep what the

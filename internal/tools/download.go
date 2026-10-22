@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -70,6 +71,12 @@ func downloadVideoTool() Tool {
 				}, Help: "A GIF can't play faster than 50 fps, so faster video is brought down to that."},
 			{Key: "fps", Label: "Frame Rate", Kind: OptNumber, Default: "15", Min: 1, Max: 50, Step: 1, Unit: "fps",
 				When: "pace=" + gifSet, Help: "Lower makes a smaller, choppier GIF."},
+			{Key: "colors", Label: "Palette Size", Kind: OptNumber, Default: "256", Min: 8, Max: 256, Step: 8,
+				Advanced: true, When: "container=" + gifContainer,
+				Help: "The colours shared by the whole GIF. Fewer makes a smaller file with more banding."},
+			{Key: "dither", Label: "Dithering", Kind: OptSelect, Default: "bayer", Advanced: true,
+				When: "container=" + gifContainer, Choices: gifDitherChoices,
+				Help: "Bayer's fine pattern holds still as things move. Sierra looks smoother but shimmers in motion."},
 			{Key: "cookies", Label: "Use Browser Cookies", Kind: OptSelect, Default: "none", Choices: []Choice{
 				{"none", "No Cookies", ""},
 				{"firefox", "Firefox", ""},
@@ -95,12 +102,19 @@ func buildDownloadVideo(in Inputs, enc Encode) (Plan, error) {
 	template := strings.TrimSuffix(in.Output, "/") + "/%(title).150B [%(id)s].%(ext)s"
 
 	var args []string
+	var finish func(string, SourceColor) (Plan, error)
 	if container == gifContainer {
 		gif, err := gifDownloadArgs(in.Options, quality)
 		if err != nil {
 			return Plan{}, err
 		}
+		if strings.TrimSpace(in.WorkDir) == "" {
+			return Plan{}, ErrNeedsWorkDir
+		}
 		args = append(args, gif...)
+		// The video lands in the work folder, and the GIF made from it is all that comes out
+		template = strings.TrimSuffix(in.WorkDir, "/") + "/%(title).150B [%(id)s].%(ext)s"
+		finish = gifFinish(in.Options, in.WorkDir, in.Output)
 	} else {
 		// Merging alone only applies when video and audio come separately,
 		// so the remux turns a single-file download into the chosen container too
@@ -131,8 +145,16 @@ func buildDownloadVideo(in Inputs, enc Encode) (Plan, error) {
 	args = append(args, extra...)
 	args = append(args, link)
 
-	return Plan{Args: args, OutputPath: in.Output, IsDownload: true}, nil
+	plan := Plan{Args: args, OutputPath: in.Output, IsDownload: true}
+	if finish != nil {
+		plan.Finish, plan.FinishCount = finish, 2
+	}
+	return plan, nil
 }
+
+// ErrNeedsWorkDir is a download's way of asking for a work folder of its own,
+// for one converted once it lands, so other downloads never get one
+var ErrNeedsWorkDir = errors.New("this download needs a work folder to land in first")
 
 // gifContainer is the Download Video choice that saves a silent GIF
 const gifContainer = "gif"
@@ -151,25 +173,9 @@ const (
 // of a second, and browsers slow a 1/100 s delay to 1/10 s
 const gifMaxRate = 50
 
-// gifDownloadArgs fetches the chosen section, or the whole video, and recodes it
-// with the same palette graph as Convert to GIF, dropping audio and subtitles
-// the GIF can't hold
+// gifDownloadArgs fetches the chosen section, or the whole video, for
+// gifFinish to turn into the GIF once it's down
 func gifDownloadArgs(opts map[string]string, quality string) ([]string, error) {
-	var section string
-	seconds := 0.0 // unknown, the whole video
-	if optStr(opts, "span", gifClip) == gifClip {
-		var err error
-		section, seconds, err = clipSection(optStr(opts, "start", "00:00:00"), optStr(opts, "end", "00:00:10"))
-		if err != nil {
-			return nil, err
-		}
-	}
-	stages := gifDownloadStages(opts)
-	filter := gifFramePaletteGraph(stages, 128, "sierra2_4a")
-	if gifOnePaletteFits(opts, seconds) {
-		filter = gifPaletteGraph(stages, 128, "sierra2_4a")
-	}
-
 	// Video only where the site has it, since the sound is thrown away, and
 	// H.264 first since the exact cut re-encodes in the source's own codec
 	selector := fmt.Sprintf("bv[height<=%s][vcodec^=avc1]/bv[height<=%s]/bv*[height<=%s]/b[height<=%s]/b",
@@ -177,22 +183,34 @@ func gifDownloadArgs(opts map[string]string, quality string) ([]string, error) {
 	if quality == "best" {
 		selector = "bv[vcodec^=avc1]/bv/bv*/b"
 	}
-	args := []string{
-		"-f", selector,
-		"--recode-video", gifContainer,
-		// The conversion writes under the final name, so a cancelled GIF
-		// leaves a short one that yt-dlp would skip as already there, and a
-		// new clip of the same video would come back as the old one
-		"--force-overwrites",
-		// yt-dlp splits this like a shell, so the double quotes keep the
-		// graph's own single quotes for ffmpeg
-		"--postprocessor-args", `VideoConvertor:-an -sn -vf "` + filter + `" -loop 0`,
-	}
-	if section != "" {
+	args := []string{"-f", selector}
+	if optStr(opts, "span", gifClip) == gifClip {
+		section, err := clipSection(optStr(opts, "start", "00:00:00"), optStr(opts, "end", "00:00:10"))
+		if err != nil {
+			return nil, err
+		}
 		// Exact cuts, since a cut on the nearest keyframe can start seconds early
 		args = append(args, "--download-sections", section, "--force-keyframes-at-cuts")
 	}
 	return args, nil
+}
+
+// gifFinish turns the video a GIF download left in work into the GIF, named
+// after it in output, drawn inside work and moved out once it's whole
+// The staged name can't be the source's, which may itself be a .gif
+func gifFinish(opts map[string]string, work, output string) func(string, SourceColor) (Plan, error) {
+	colors := optInt(opts, "colors", 256)
+	dither := optStr(opts, "dither", "bayer")
+	return func(src string, color SourceColor) (Plan, error) {
+		if src == "" {
+			return Plan{}, errors.New("the download left no video to make the GIF from")
+		}
+		name := strings.TrimSuffix(filepath.Base(src), filepath.Ext(src)) + ".gif"
+		stages := gifColorStage(color) + gifDownloadStages(opts)
+		p := gifTwoPass(src, filepath.Join(work, "result.gif"), filepath.Join(work, "palette.png"), stages, colors, dither)
+		p.Staged, p.OutputPath = p.OutputPath, filepath.Join(output, name)
+		return p, nil
+	}
 }
 
 // gifDownloadStages sets the frame rate and width before the palette, keeping
@@ -209,39 +227,21 @@ func gifDownloadStages(opts map[string]string) string {
 	return stage
 }
 
-// gifOnePaletteBudget bounds frames times width squared for one palette over
-// the whole GIF, about 400 MB for 16:9 video, since palettegen holds every
-// frame until it has seen the last
-const gifOnePaletteBudget = 160_000_000
-
-// gifOnePaletteFits reports whether a GIF is a clip small enough for one
-// palette, which is sharper and smaller than a palette per frame
-// Anything at its original size or rate, or of unknown length, isn't
-func gifOnePaletteFits(opts map[string]string, seconds float64) bool {
-	if seconds <= 0 || optStr(opts, "sizing", gifSet) != gifSet || optStr(opts, "pace", gifSet) != gifSet {
-		return false
-	}
-	width := optFloat(opts, "width", 480)
-	frames := seconds * optFloat(opts, "fps", 15)
-	return frames*width*width <= gifOnePaletteBudget
-}
-
-// clipSection renders a yt-dlp time range and its length in seconds, always
-// closed since a blank end falls back to its default, and Whole Video is a
-// separate choice
-func clipSection(start, end string) (string, float64, error) {
+// clipSection renders a yt-dlp time range, always closed since a blank end
+// falls back to its default, and Whole Video is a separate choice
+func clipSection(start, end string) (string, error) {
 	from, err := clipSeconds(start)
 	if err != nil {
-		return "", 0, err
+		return "", err
 	}
 	to, err := clipSeconds(end)
 	if err != nil {
-		return "", 0, err
+		return "", err
 	}
 	if to <= from {
-		return "", 0, errors.New("the end time must come after the start time")
+		return "", errors.New("the end time must come after the start time")
 	}
-	return "*" + start + "-" + end, to - from, nil
+	return "*" + start + "-" + end, nil
 }
 
 // clipTime is the shape yt-dlp reads the way it looks, since it takes a
@@ -333,7 +333,7 @@ func siteLink(link, container string) (string, []string) {
 		return link, nil
 	}
 	// The MP4 keeps its .gif name and yt-dlp takes the type from the link, so
-	// a GIF download skipped converting it
+	// the file would land named .gif and a remux would see a GIF
 	extra := []string{"--add-header", "Accept:*/*", "--parse-metadata", "video:mp4:%(ext)s"}
 	// Reddit serves one file, so any format is that file, where MOV's ext=mp4
 	// found nothing under the .gif name

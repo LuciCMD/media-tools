@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"media-tools/internal/ffmpeg"
 )
 
 // These run the real yt-dlp against a clip served from 127.0.0.1, so they
@@ -44,7 +46,8 @@ func runDownload(t *testing.T, link string, opts map[string]string) ([]string, s
 		t.Fatalf("Validate: %v", err)
 	}
 	out := t.TempDir()
-	plan, err := tool.Build(Inputs{Path: link, Output: out, Options: valid}, softwareEncode())
+	work := testWorkDir(t, out)
+	plan, err := tool.Build(Inputs{Path: link, Output: out, WorkDir: work, Options: valid}, softwareEncode())
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -56,12 +59,59 @@ func runDownload(t *testing.T, link string, opts map[string]string) ([]string, s
 	if runErr != nil {
 		t.Logf("yt-dlp %q", args)
 	}
+	if runErr == nil {
+		var more string
+		more, runErr = finishDownload(ctx, plan, work)
+		log = append(log, more...)
+	}
+	_ = os.RemoveAll(work)
 	entries, _ := os.ReadDir(out)
 	var files []string
 	for _, e := range entries {
 		files = append(files, filepath.Join(out, e.Name()))
 	}
 	return files, string(log), runErr
+}
+
+// testWorkDir makes a download's work folder inside out, as the app does
+func testWorkDir(t *testing.T, out string) string {
+	t.Helper()
+	work, err := os.MkdirTemp(out, ".mediatools-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return work
+}
+
+// finishDownload makes the result from what a download left in work, the
+// way the job's next stage does, for a plan that has one
+func finishDownload(ctx context.Context, plan Plan, work string) (string, error) {
+	if plan.Finish == nil {
+		return "", nil
+	}
+	src, err := ffmpeg.FindDownload(work)
+	if err != nil {
+		return "", err
+	}
+	fp, err := plan.Finish(src, SourceColor{})
+	if err != nil {
+		return "", err
+	}
+	bin := ffmpeg.Locate().FFmpeg
+	var log []byte
+	for _, args := range fp.Commands() {
+		out, err := exec.CommandContext(ctx, bin, append([]string{"-hide_banner", "-nostdin"}, args...)...).CombinedOutput()
+		log = append(log, out...)
+		if err != nil {
+			return string(log), err
+		}
+	}
+	if fp.Staged != "" {
+		if err := os.Rename(fp.Staged, fp.OutputPath); err != nil {
+			return string(log), err
+		}
+	}
+	return string(log), nil
 }
 
 // probeDuration reads a file's duration in seconds with ffprobe

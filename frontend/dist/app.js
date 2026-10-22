@@ -15,7 +15,7 @@ const LIMITS = {
   saveDelayMs: 350,
   drawDelayMs: 100,
   sliderSteps: 400, // wider ranges get a number field instead of a slider
-  whenDepth: 12, // a chain of "when" conditions, one per option at most
+  whenDepth: 14, // a chain of "when" conditions, one per option at most
 };
 
 // Download leads because it's what most people open the app for
@@ -1675,7 +1675,8 @@ function jobStats(job) {
     if (p.bytesPerSec > 0) {
       parts.push(`${bytes(p.bytesPerSec)}/s`);
     }
-    if (p.passes > 1) {
+    // A named step already says where the job is
+    if (p.passes > 1 && !p.stage) {
       parts.push(`pass ${p.pass} of ${p.passes}`);
     }
     if (p.totalSec > 0 && p.outTimeSec > 0) {

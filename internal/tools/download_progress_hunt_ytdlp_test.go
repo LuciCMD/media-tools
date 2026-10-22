@@ -175,8 +175,9 @@ func TestYtdlpSeparatePartsBarOnlyMovesForward(t *testing.T) {
 	}
 }
 
-// TestYtdlpStepsAreNamed checks Download Audio and a GIF clip name their
-// conversion step, and every templated line yt-dlp printed was read
+// TestYtdlpStepsAreNamed checks Download Audio names its conversion step, and
+// every templated line yt-dlp printed was read
+// A GIF's steps are the job's own now, named by the plan, see download_test.go
 func TestYtdlpStepsAreNamed(t *testing.T) {
 	link := localVideoServer(t)
 	cases := []struct {
@@ -185,7 +186,6 @@ func TestYtdlpStepsAreNamed(t *testing.T) {
 		want       string
 	}{
 		{"audio", "download.audio", map[string]string{"format": "mp3"}, "Converting audio"},
-		{"gif", "download.video", map[string]string{"container": "gif", "start": "00:00:02", "end": "00:00:06"}, "Converting"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

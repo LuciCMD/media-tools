@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
@@ -36,7 +37,8 @@ func softwareEncode() Encode {
 // tool that needs one.
 func defaultInputs(tool Tool, opts map[string]string) Inputs {
 	if tool.Input == InputURL {
-		return Inputs{Path: "https://example.com/watch?v=abc", Output: `C:\downloads`, Options: opts}
+		return Inputs{Path: "https://example.com/watch?v=abc", Output: `C:\downloads`,
+			WorkDir: `C:\downloads\.mediatools-test`, Options: opts}
 	}
 	in := Inputs{Path: `C:\media\clip.mp4`, Output: `C:\media\out.mp4`, Options: opts}
 	if tool.Combine {
@@ -425,17 +427,31 @@ func TestImageQualityScaleInverts(t *testing.T) {
 	}
 }
 
-// TestGIFBuildsSinglePassPalette checks the palette graph is present.
-func TestGIFBuildsSinglePassPalette(t *testing.T) {
+// TestGIFBuildsAPaletteThenTheGIF checks Convert to GIF makes its palette
+// first and draws with it second, removing it after, where one command with
+// split held every frame in memory until palettegen saw the last
+func TestGIFBuildsAPaletteThenTheGIF(t *testing.T) {
 	tool, _ := Get("video.gif")
 	opts, _ := tool.Validate(nil)
 	plan, err := tool.Build(Inputs{Path: "a.mp4", Output: "a.gif", Options: opts}, softwareEncode())
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	filter := argValue(plan.Args, "-vf")
-	if !strings.Contains(filter, "palettegen") || !strings.Contains(filter, "paletteuse") {
-		t.Errorf("gif filter missing the palette stages: %s", filter)
+	if len(plan.Passes) != 1 || len(plan.Steps) != 2 {
+		t.Fatalf("want two named commands, got %d passes after the first and steps %q", len(plan.Passes), plan.Steps)
+	}
+	gen := argValue(plan.Args, "-vf")
+	if !strings.Contains(gen, "palettegen=max_colors=128:stats_mode=diff") || strings.Contains(gen, "split") ||
+		plan.Args[len(plan.Args)-1] != "a.gif.mediatools-palette.png" {
+		t.Errorf("first command %q", plan.Args)
+	}
+	use := plan.Passes[0]
+	if !argsContain(use, "-i", "a.gif.mediatools-palette.png") || !strings.Contains(argValue(use, "-lavfi"), "paletteuse=dither=sierra2_4a") ||
+		use[len(use)-1] != "a.gif" {
+		t.Errorf("second command %q", use)
+	}
+	if !slices.Equal(plan.Cleanup, []string{"a.gif.mediatools-palette.png"}) {
+		t.Errorf("cleanup %q, want the palette", plan.Cleanup)
 	}
 }
 

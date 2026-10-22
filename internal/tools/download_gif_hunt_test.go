@@ -11,22 +11,14 @@ import (
 	"testing"
 )
 
-// gifGraph builds Download Video as GIF for opts and returns its -vf graph,
-// unwrapped from the double quotes yt-dlp splits on
+// gifGraph builds Download Video as GIF for opts and returns the graph its
+// palette command runs
 func gifGraph(t *testing.T, opts map[string]string) (Plan, string) {
 	t.Helper()
 	opts["container"] = "gif"
 	plan := buildVideoDownload(t, opts)
-	pp := argValue(plan.Args, "--postprocessor-args")
-	_, rest, ok := strings.Cut(pp, `-vf "`)
-	if !ok {
-		t.Fatalf("no quoted -vf in %q", pp)
-	}
-	graph, _, ok := strings.Cut(rest, `"`)
-	if !ok {
-		t.Fatalf("unterminated -vf quote in %q", pp)
-	}
-	return plan, graph
+	palette, _ := gifGraphs(gifFinishOf(t, plan))
+	return plan, palette
 }
 
 // TestDownloadGIFEveryChoiceCombination checks each of the eight span,
@@ -121,7 +113,8 @@ func TestDownloadGIFNumbersStayPositiveInTheGraph(t *testing.T) {
 		if err != nil {
 			continue
 		}
-		pp := argValue(plan.Args, "--postprocessor-args")
+		palette, draw := gifGraphs(gifFinishOf(t, plan))
+		pp := palette + " " + draw
 		for _, m := range num.FindAllStringSubmatch(pp, -1) {
 			for _, s := range m[1:] {
 				if s == "" {
@@ -135,35 +128,52 @@ func TestDownloadGIFNumbersStayPositiveInTheGraph(t *testing.T) {
 	}
 }
 
-// gifPeakMemory runs ffmpeg with the GIF graph on a generated clip of secs
-// seconds and returns its peak memory in KiB, as -benchmark reports it
-func gifPeakMemory(t *testing.T, bin, graph string, secs int) int {
+// gifPeakMemory makes a GIF the way a download is finished, from a generated
+// clip of secs seconds, and returns the larger command's peak memory in KiB,
+// as -benchmark reports it
+func gifPeakMemory(t *testing.T, bin string, opts map[string]string, secs int) int {
 	t.Helper()
 	dir := t.TempDir()
 	src := filepath.Join(dir, "src.mp4")
 	run(t, bin, "-f", "lavfi", "-i", fmt.Sprintf("testsrc2=s=640x360:r=30:d=%d", secs),
 		"-c:v", "libx264", "-preset", "ultrafast", "-y", src)
-	out, err := exec.Command(bin, "-hide_banner", "-nostdin", "-benchmark", "-i", src,
-		"-an", "-sn", "-vf", graph, "-loop", "0", "-y", filepath.Join(dir, "out.gif")).CombinedOutput()
+	tool, _ := Get("download.video")
+	valid, err := tool.Validate(opts)
 	if err != nil {
-		t.Fatalf("ffmpeg: %v\n%s", err, out)
+		t.Fatal(err)
 	}
-	m := regexp.MustCompile(`maxrss=(\d+)KiB`).FindStringSubmatch(string(out))
-	if m == nil {
-		t.Skipf("this ffmpeg doesn't report maxrss:\n%s", out)
+	plan, err := tool.Build(Inputs{Path: "https://example.com/v", Output: dir, WorkDir: dir, Options: valid}, softwareEncode())
+	if err != nil {
+		t.Fatal(err)
 	}
-	kib, _ := strconv.Atoi(m[1])
-	return kib
+	fp, err := plan.Finish(src, SourceColor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	peak := 0
+	for _, args := range fp.Commands() {
+		out, err := exec.Command(bin, append([]string{"-hide_banner", "-nostdin", "-benchmark"}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("ffmpeg: %v\n%s", err, out)
+		}
+		m := regexp.MustCompile(`maxrss=(\d+)KiB`).FindStringSubmatch(string(out))
+		if m == nil {
+			t.Skipf("this ffmpeg doesn't report maxrss:\n%s", out)
+		}
+		kib, _ := strconv.Atoi(m[1])
+		peak = max(peak, kib)
+	}
+	return peak
 }
 
-// TestDownloadGIFWholeVideoMemoryIsBounded checks the GIF graph's memory
-// doesn't grow with the video's length, since Whole Video now feeds it the
-// entire download, and the one-pass palette holds every frame until the end
+// TestDownloadGIFWholeVideoMemoryIsBounded checks making the GIF doesn't take
+// more memory the longer the video, since Whole Video feeds it the entire
+// download, where one command holding every frame for its palette did
 func TestDownloadGIFWholeVideoMemoryIsBounded(t *testing.T) {
 	bins := needFFmpeg(t)
-	_, graph := gifGraph(t, map[string]string{"span": "original", "sizing": "original", "pace": "original"})
-	short := gifPeakMemory(t, bins.FFmpeg, graph, 4)
-	long := gifPeakMemory(t, bins.FFmpeg, graph, 16)
+	opts := map[string]string{"container": "gif", "span": "original", "sizing": "original", "pace": "original"}
+	short := gifPeakMemory(t, bins.FFmpeg, opts, 4)
+	long := gifPeakMemory(t, bins.FFmpeg, opts, 16)
 	t.Logf("peak memory: 4 s %d MiB, 16 s %d MiB", short/1024, long/1024)
 	if long > short*2 {
 		t.Errorf("peak memory grows with length: 4 s of 640x360 takes %d MiB, 16 s takes %d MiB, "+

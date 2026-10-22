@@ -42,6 +42,8 @@ type Stream struct {
 	Channels   int    `json:"channels,omitempty"`
 	Language   string `json:"language,omitempty"`
 	BitRate    int64  `json:"bitRate,omitempty"`
+	// ColorSpace is the colour standard a video names, empty or "unknown" when it names none
+	ColorSpace string `json:"colorSpace,omitempty"`
 }
 
 // rawProbe mirrors the ffprobe JSON schema for decoding only.
@@ -58,6 +60,7 @@ type rawProbe struct {
 		CodecName     string `json:"codec_name"`
 		Width         int    `json:"width"`
 		Height        int    `json:"height"`
+		ColorSpace    string `json:"color_space"`
 		AvgFrameRate  string `json:"avg_frame_rate"`
 		RFrameRate    string `json:"r_frame_rate"`
 		SampleRate    string `json:"sample_rate"`
@@ -134,6 +137,7 @@ func decodeProbe(path string, out []byte) (MediaInfo, error) {
 			Codec:      s.CodecName,
 			Width:      s.Width,
 			Height:     s.Height,
+			ColorSpace: s.ColorSpace,
 			FrameRate:  normalizeRate(s.AvgFrameRate, s.RFrameRate),
 			SampleRate: s.SampleRate,
 			Channels:   s.Channels,
