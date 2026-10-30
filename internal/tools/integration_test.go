@@ -110,6 +110,9 @@ func TestEveryToolRunsOnRealMedia(t *testing.T) {
 				SubtitleTracks: subtitleTracks(t, source)}
 			if tool.Combine {
 				in.Paths = []string{f.video, f.clip}
+				if source == f.image {
+					in.Paths = []string{f.image, f.image}
+				}
 			}
 			in.Output = filepath.Join(out, strings.ReplaceAll(tool.ID, ".", "_")+"."+tool.ExtensionFor(opts, source))
 			if tool.ID == "video.frames" {
@@ -168,6 +171,12 @@ func runPlanWith(t *testing.T, bin string, tool Tool, in Inputs, enc Encode) Pla
 	}
 	for _, args := range plan.Commands() {
 		run(t, bin, args...)
+	}
+	// Moved into place as the queue does
+	if plan.Staged != "" {
+		if err := os.Rename(plan.Staged, plan.OutputPath); err != nil {
+			t.Fatal(err)
+		}
 	}
 	for _, path := range append(filesOf(plan), plan.Cleanup...) {
 		_ = os.Remove(path)

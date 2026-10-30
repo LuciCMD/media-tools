@@ -20,9 +20,11 @@ const (
 	MaxWorkers     = 8
 	MinWorkers     = 1
 	emitIntervalMs = 120
-	maxPasses      = 4 // commands in one job, a two-pass encode needing two
-	maxProbePaths  = 128
-	maxJobFiles    = 8
+	// MaxCommands bounds the commands in one job, a GIF of 500 images needing 502
+	MaxCommands   = 512
+	maxPasses     = MaxCommands
+	maxProbePaths = 128
+	maxJobFiles   = 8
 )
 
 // State is the lifecycle position of a job.
@@ -86,6 +88,9 @@ type Commands struct {
 	Cleanup []string
 	// Steps names each command for the job board, in order
 	Steps []string
+	// Fixup changes the result once every command has succeeded, before Keep
+	// moves it, for what the program can't be told to do itself
+	Fixup func() error
 	// Keep moves a file into place once every command has succeeded, so a
 	// failed or cancelled job leaves nothing half made at its destination
 	Keep *Move
@@ -286,6 +291,9 @@ func (q *Queue) execute(id string) {
 	if err == nil {
 		err = q.runPasses(ctx, id, spec.Binary, cmds, totals, 0, count)
 	}
+	if err == nil && cmds.Fixup != nil {
+		err = cmds.Fixup()
+	}
 	if err == nil {
 		err = keep(cmds.Keep)
 	}
@@ -315,6 +323,9 @@ func (q *Queue) runThen(ctx context.Context, id string, spec Spec, first, count 
 	err = writeFiles(stage.Files)
 	if err == nil {
 		err = q.runPasses(ctx, id, stage.Binary, stage.Commands, stage.Totals, first, count)
+	}
+	if err == nil && stage.Fixup != nil {
+		err = stage.Fixup()
 	}
 	if err == nil {
 		err = keep(stage.Keep)

@@ -773,6 +773,9 @@ function addFiles(tool, paths) {
   }
   const seen = new Set(state.files);
   const merged = state.files.slice();
+  if (tool.sortByName) {
+    paths = nameOrder(paths);
+  }
   for (let i = 0; i < paths.length && merged.length < LIMITS.batchFiles; i++) {
     if (!seen.has(paths[i])) {
       seen.add(paths[i]);
@@ -783,6 +786,16 @@ function addFiles(tool, paths) {
     toast(`A batch holds at most ${LIMITS.batchFiles} files, so the rest were left out.`, "warn");
   }
   setFiles(merged);
+}
+
+// Files added together go in name order when every name is numbered, frame2
+// before frame10, otherwise they keep the order they came in
+function nameOrder(paths) {
+  if (paths.length < 2 || !paths.every((p) => /\d/.test(baseName(p)))) {
+    return paths;
+  }
+  const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+  return paths.slice().sort((a, b) => collator.compare(baseName(a), baseName(b)));
 }
 
 async function pickFiles(tool) {

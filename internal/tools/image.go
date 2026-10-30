@@ -16,6 +16,7 @@ func imageTools() []Tool {
 		convertImageTool(),
 		heicTool(),
 		resizeImageTool(),
+		imagesToGIFTool(),
 		icoTool(),
 		stripMetadataTool(),
 		watermarkTool(),

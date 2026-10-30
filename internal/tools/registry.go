@@ -123,6 +123,12 @@ type Plan struct {
 	// Staged is where the last command writes, moved to OutputPath once every
 	// command has succeeded, so a cancelled job leaves nothing half made there
 	Staged string
+	// Frames, when set, is how many frames each command handles, for the bar,
+	// so the sources aren't probed for a length they don't have
+	Frames int
+	// Disposal, when set, is written into every frame of the staged GIF once
+	// the commands have succeeded, DisposeKeep or DisposeClear
+	Disposal int
 
 	// Finish, for a download that's converted afterwards, builds the ffmpeg
 	// commands that turn src, the file the download left in its work folder,
@@ -198,6 +204,9 @@ type Tool struct {
 	// Combine makes one job from every selected file, in the order shown,
 	// rather than one job per file.
 	Combine bool `json:"combine"`
+	// SortByName puts files added together in name order when every name
+	// holds a number, so frame2 comes before frame10, and they can still be moved
+	SortByName bool `json:"sortByName,omitempty"`
 	// NeedsDuration defers Build until the source has been probed, for a tool
 	// whose command depends on the length, such as a size target.
 	NeedsDuration bool `json:"needsDuration"`
@@ -207,6 +216,9 @@ type Tool struct {
 	// NeedsColor defers Build the same way for a tool that wants the source's
 	// colours, which a failed probe only leaves unchecked
 	NeedsColor bool `json:"needsColor,omitempty"`
+	// NeedsSize defers Build the same way for a tool that needs the first
+	// source's picture size, and the job fails when it can't be read
+	NeedsSize bool `json:"needsSize,omitempty"`
 	// VideoKeepsFormat makes a video input keep its own container whatever
 	// the format option says; the option applies to audio inputs only.
 	VideoKeepsFormat bool `json:"videoKeepsFormat,omitempty"`

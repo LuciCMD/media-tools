@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"media-tools/internal/ffmpeg"
+	"media-tools/internal/giffix"
 	"media-tools/internal/jobs"
 	"media-tools/internal/settings"
 	"media-tools/internal/tools"
@@ -603,10 +604,10 @@ func (a *App) submitJob(tool tools.Tool, req RunRequest, opts map[string]string,
 	in := tools.Inputs{Path: first, Paths: paths, Output: target.file, Options: opts,
 		Sidecar: findSidecar(first, tool.Sidecars), SubtitleTracks: tools.UnknownCount}
 
-	// A tool whose command depends on the length, the tracks or the colours is
+	// A tool whose command depends on the length, tracks, colours or size is
 	// built again by the worker once the source is probed, and building it now
 	// with stand-ins still checks every option while the user is looking
-	deferred := tool.NeedsDuration || tool.NeedsStreams || tool.NeedsColor
+	deferred := tool.NeedsDuration || tool.NeedsStreams || tool.NeedsColor || tool.NeedsSize
 	check := in
 	if tool.NeedsDuration {
 		check.DurationS = validationDurationS
@@ -627,8 +628,15 @@ func (a *App) submitJob(tool tools.Tool, req RunRequest, opts map[string]string,
 		Output: target.claim,
 		Binary: a.bins.FFmpeg,
 	}
+	// A plan that counts its own frames needs no probing for the bar, and
+	// stills have no length to probe for
+	if plan.Frames > 0 {
+		spec.Totals = ffmpeg.Totals{Frames: int64(plan.Frames)}
+	}
 	if deferred {
-		spec.ProbePaths = paths
+		if plan.Frames <= 0 {
+			spec.ProbePaths = paths
+		}
 		spec.Prepare = func(ctx context.Context, totals ffmpeg.Totals) (jobs.Commands, error) {
 			probed, err := probedInputs(ctx, tool, in, totals)
 			if err != nil {
@@ -646,7 +654,7 @@ func (a *App) submitJob(tool tools.Tool, req RunRequest, opts map[string]string,
 		spec.Steps = cmds.Steps
 		// The worker probes the sources just before running, so a large batch
 		// is queued at once instead of waiting here on one ffprobe per file.
-		if plan.NeedsProbe {
+		if plan.NeedsProbe && plan.Frames <= 0 {
 			spec.ProbePaths = paths
 		}
 	}
@@ -666,6 +674,13 @@ func probedInputs(ctx context.Context, tool tools.Tool, in tools.Inputs, totals 
 		return in, errors.New("the length of this video couldn't be read, so it can't be sized")
 	}
 	in.DurationS = totals.DurationS
+	if tool.NeedsSize {
+		w, h, err := ffmpeg.ShownSize(ctx, in.Path)
+		if err != nil {
+			return in, fmt.Errorf("couldn't read the size of %s", filepath.Base(in.Path))
+		}
+		in.Color = tools.SourceColor{Width: w, Height: h}
+	}
 	if !tool.NeedsStreams && !tool.NeedsColor {
 		return in, nil
 	}
@@ -724,6 +739,10 @@ func commandsOf(p tools.Plan) jobs.Commands {
 	}
 	if p.Staged != "" {
 		cmds.Keep = &jobs.Move{From: p.Staged, To: p.OutputPath}
+	}
+	if p.Disposal != 0 && p.Staged != "" {
+		staged, method := p.Staged, p.Disposal
+		cmds.Fixup = func() error { return giffix.SetDisposal(staged, method) }
 	}
 	return cmds
 }
